@@ -6,6 +6,33 @@
 #include "proc.h"
 #include "defs.h"
 
+struct proc_queue queues_array[QUEUE_COUNT];
+struct proc_queue *queues = queues_array;
+int ticks_since_boost = 0;
+void
+enqueue(struct proc_queue *q, struct proc *p)
+{
+  if(p->in_queue)
+    return;  // already queued; safety
+
+  q->procs[q->tail] = p;
+  q->tail = (q->tail + 1) % NPROC;
+  p->in_queue = 1;
+}
+
+struct proc *
+dequeue(struct proc_queue *q)
+{
+  if(q->head == q->tail)
+    return 0; // empty
+
+  struct proc *p = q->procs[q->head];
+  q->head = (q->head + 1) % NPROC;
+  p->in_queue = 0;
+  return p;
+}
+
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -51,9 +78,18 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+
+  for(int i = 0; i < QUEUE_COUNT; i++){
+    queues[i].head = queues[i].tail = 0;
+    initlock(&queues[i].lock, "queue_lock");
+  }
+
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->state = UNUSED;
+      p->queue = 0;
+      p->time_in_queue = 0;
+      p->in_queue = 0;
       p->kstack = KSTACK((int) (p - proc));
   }
 }
@@ -124,6 +160,10 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->queue = 0;
+  p->time_in_queue = 0;
+  p->in_queue = 0;
+
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -228,6 +268,14 @@ userinit(void)
 
   p->state = RUNNABLE;
 
+  p->queue = 0;
+  p->time_in_queue = 0;
+  p->in_queue = 0;
+  acquire(&queues[p->queue].lock);
+  enqueue(&queues[p->queue], p);
+  release(&queues[p->queue].lock);
+
+
   release(&p->lock);
 }
 
@@ -279,6 +327,10 @@ kfork(void)
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
+  np->queue = p->queue;    // or 0 if you prefer always start high
+  np->time_in_queue = 0;
+  np->in_queue = 0;
+
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
@@ -297,6 +349,14 @@ kfork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+
+  np->time_in_queue = 0;
+  np->in_queue = 0;
+  acquire(&queues[np->queue].lock);
+  enqueue(&queues[np->queue], np);
+  release(&queues[np->queue].lock);
+
+
   release(&np->lock);
 
   return pid;
@@ -418,46 +478,83 @@ kwait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+
 void
 scheduler(void)
 {
-  struct proc *p;
   struct cpu *c = mycpu();
-
   c->proc = 0;
+
   for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting. Then turn them back off
-    // to avoid a possible race between an interrupt
-    // and wfi.
+    // enable interrupts on this CPU
     intr_on();
-    intr_off();
 
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
+    // always look from highest to lowest queue
+    for(int q = 0; q < QUEUE_COUNT; q++){
+      struct proc *p = 0;
+
+      // take one process from this queue
+      acquire(&queues[q].lock);
+      p = dequeue(&queues[q]);
+      release(&queues[q].lock);
+
+      if(p == 0)
+        continue;  // nothing here, try next queue
+
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+      if(p->state != RUNNABLE){
+        // if it's not runnable anymore, just skip it
+        p->in_queue = 0;
+        release(&p->lock);
+        continue;
       }
+
+      c->proc = p;
+      p->state = RUNNING;
+
+      swtch(&c->context, &p->context);
+
+      c->proc = 0;
+
+      // we come back here when the process yields / sleeps / exits
+      if(p->state == RUNNABLE){
+        // process still ready, so decide whether to demote
+
+        int old_q = p->queue;
+        int quantum;
+
+        if(old_q == 0)
+          quantum = QUEUE0_TIME;
+        else if(old_q == 1)
+          quantum = QUEUE1_TIME;
+        else
+          quantum = QUEUE1_TIME;   // for lower queues, same quantum (or pick another)
+
+        if(p->time_in_queue >= quantum && old_q < QUEUE_COUNT - 1){
+          // used full slice → demote
+          p->queue++;
+          p->time_in_queue = 0;
+          // optional debug:
+          // printf("demote pid %d to queue %d\n", p->pid, p->queue);
+        }
+
+        // re-enqueue at new queue level
+        int new_q = p->queue;
+        acquire(&queues[new_q].lock);
+        enqueue(&queues[new_q], p);
+        release(&queues[new_q].lock);
+      }
+
       release(&p->lock);
-    }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      asm volatile("wfi");
+
+      // after running one process, break to restart scan from top queue
+      break;
     }
   }
 }
+
+
 
 // Switch to scheduler.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
@@ -577,6 +674,12 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+	p->time_in_queue = 0;
+	if(!p->in_queue){
+	  acquire(&queues[p->queue].lock);
+	  enqueue(&queues[p->queue], p);
+	  release(&queues[p->queue].lock);
+	}
       }
       release(&p->lock);
     }
@@ -684,4 +787,54 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+
+void
+boost_queues(void)
+{
+  // clear all queues
+  for(int i = 0; i < QUEUE_COUNT; i++){
+    acquire(&queues[i].lock);
+    queues[i].head = queues[i].tail = 0;
+    release(&queues[i].lock);
+  }
+
+  // move all runnable processes to queue 0
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state == RUNNABLE){
+      p->queue = 0;
+      p->time_in_queue = 0;
+      p->in_queue = 0;  // will be set by enqueue
+      release(&p->lock);
+
+      acquire(&queues[0].lock);
+      enqueue(&queues[0], p);
+      release(&queues[0].lock);
+    } else {
+      release(&p->lock);
+    }
+  }
+}
+
+int
+getprocinfo(int pid, struct procinfo *pi)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->pid == pid){
+      pi->pid = p->pid;
+      pi->state = p->state;
+      pi->queue = p->queue;                // your MLFQ queue
+      pi->time_in_queue = p->time_in_queue;// your MLFQ ticks
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+  return -1;   // not found
 }

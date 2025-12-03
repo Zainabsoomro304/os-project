@@ -81,6 +81,14 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+struct procinfo {
+  int pid;
+  int state;
+  int queue;
+  int time_in_queue;
+};
+
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +112,19 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int time_in_queue;   // time (ticks) at current level
+  int queue;           // current queue index (0..QUEUE_COUNT-1)
+  int in_queue;        // 0/1: is it currently in a queue?
+};
+
+#define QUEUE_COUNT 3
+#define QUEUE0_TIME 4
+#define QUEUE1_TIME 50
+#define BOOST_TIME  20   // in ticks, pick whatever your project wants
+
+struct proc_queue {
+  struct proc *procs[NPROC];
+  int head;              // first valid process
+  int tail;              // next free slot
+  struct spinlock lock;
 };

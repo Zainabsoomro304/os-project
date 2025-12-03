@@ -6,6 +6,8 @@
 #include "proc.h"
 #include "defs.h"
 
+void clockintr(void);   // should already exist, but just in case
+
 struct spinlock tickslock;
 uint ticks;
 
@@ -47,10 +49,12 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
+  if(p == 0)
+    panic("usertrap: no proc");
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
+
   if(r_scause() == 8){
     // system call
 
@@ -66,12 +70,45 @@ usertrap(void)
     intr_on();
 
     syscall();
+
   } else if((which_dev = devintr()) != 0){
-    // ok
+    // device interrupt
+
+    if(which_dev == 2){
+      // timer interrupt: MLFQ accounting + preemption
+      if(p->state == RUNNING){
+        p->time_in_queue++;
+        ticks_since_boost++;
+
+        int q = p->queue;
+        int quantum;
+        if(q == 0)
+          quantum = QUEUE0_TIME;
+        else if(q == 1)
+          quantum = QUEUE1_TIME;
+        else
+          quantum = QUEUE1_TIME;   // or your Q2_TIME if you have one
+
+        // used full time slice -> preempt
+        if(p->time_in_queue >= quantum){
+          yield();    // causes scheduler() to run and demote
+        }
+
+        // optional: starvation prevention
+        if(ticks_since_boost >= BOOST_TIME){
+          boost_queues();
+          ticks_since_boost = 0;
+        }
+      }
+    }
+
   } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
+            vmfault(p->pagetable, r_stval(),
+                    (r_scause() == 13) ? 1 : 0) == 0){
+    // page fault handled by lazy allocation; nothing more to do
+
   } else {
+    // unexpected trap
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     setkilled(p);
@@ -80,10 +117,7 @@ usertrap(void)
   if(killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
-
+  // prepare to return to user mode
   prepare_return();
 
   // the user page table to switch to, for trampoline.S
@@ -92,6 +126,7 @@ usertrap(void)
   // return to trampoline.S; satp value in a0.
   return satp;
 }
+
 
 //
 // set up trapframe and control registers for a return to user space

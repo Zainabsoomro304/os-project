@@ -9,6 +9,10 @@ struct sleeplock;
 struct stat;
 struct superblock;
 
+struct proc_queue;
+struct procinfo;
+
+
 // bio.c
 void            binit(void);
 struct buf*     bread(uint, uint);
@@ -101,6 +105,17 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+
+struct proc_queue;
+
+extern struct proc_queue *queues;
+extern int ticks_since_boost;
+
+void enqueue(struct proc_queue *q, struct proc *p);
+struct proc *dequeue(struct proc_queue *q);
+void boost_queues(void);
+
+int getprocinfo(int pid, struct procinfo *pi);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
