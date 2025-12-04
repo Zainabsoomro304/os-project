@@ -79,6 +79,8 @@ usertrap(void)
       if(p->state == RUNNING){
         p->time_in_queue++;
         ticks_since_boost++;
+	printf("process %d ticks: %d\n", p->pid, p->time_in_queue);
+	printf("ticks since boost: %d\n", ticks_since_boost);
 
         int q = p->queue;
         int quantum;

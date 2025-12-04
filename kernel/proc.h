@@ -119,7 +119,7 @@ struct proc {
 
 #define QUEUE_COUNT 3
 #define QUEUE0_TIME 4
-#define QUEUE1_TIME 50
+#define QUEUE1_TIME 8
 #define BOOST_TIME  20   // in ticks, pick whatever your project wants
 
 struct proc_queue {

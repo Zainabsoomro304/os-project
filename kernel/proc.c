@@ -274,8 +274,8 @@ userinit(void)
   acquire(&queues[p->queue].lock);
   enqueue(&queues[p->queue], p);
   release(&queues[p->queue].lock);
-
-
+  printf("fork enqueued %d\n", p->pid);
+  print_queues();
   release(&p->lock);
 }
 
@@ -355,8 +355,8 @@ kfork(void)
   acquire(&queues[np->queue].lock);
   enqueue(&queues[np->queue], np);
   release(&queues[np->queue].lock);
-
-
+  printf("fork enqueued %d\n", np->pid);
+  print_queues();
   release(&np->lock);
 
   return pid;
@@ -535,8 +535,7 @@ scheduler(void)
           // used full slice → demote
           p->queue++;
           p->time_in_queue = 0;
-          // optional debug:
-          // printf("demote pid %d to queue %d\n", p->pid, p->queue);
+          printf("demote pid %d to queue %d\n", p->pid, p->queue);
         }
 
         // re-enqueue at new queue level
@@ -544,6 +543,7 @@ scheduler(void)
         acquire(&queues[new_q].lock);
         enqueue(&queues[new_q], p);
         release(&queues[new_q].lock);
+	print_queues();
       }
 
       release(&p->lock);
@@ -804,7 +804,7 @@ boost_queues(void)
   struct proc *p;
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
-    if(p->state == RUNNABLE){
+    if(p->state == RUNNABLE || p->state == RUNNING){
       p->queue = 0;
       p->time_in_queue = 0;
       p->in_queue = 0;  // will be set by enqueue
@@ -817,6 +817,7 @@ boost_queues(void)
       release(&p->lock);
     }
   }
+  print_queues();
 }
 
 int
@@ -837,4 +838,23 @@ getprocinfo(int pid, struct procinfo *pi)
     release(&p->lock);
   }
   return -1;   // not found
+}
+
+void
+print_queues(void)
+{
+  printf("\nQueue Status:\n");
+  for(int q = 0; q < QUEUE_COUNT; q++){
+    printf("Queue %d:", q);
+    acquire(&queues[q].lock);
+    int i = queues[q].head;
+    while(i != queues[q].tail){
+      struct proc *p = queues[q].procs[i];
+      if(p)
+        printf(" %d", p->pid);
+      i = (i + 1) % NPROC;
+    }
+    release(&queues[q].lock);
+    printf("\n");
+  }
 }
